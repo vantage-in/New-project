@@ -31,9 +31,12 @@ Notify TA if any additional modules need to be installed on the evaluation serve
 
 However, it is NOT ALLOWED to use pre-built PPO implementations (e.g.: Stable-Baselines3 or RLlib).
 You must implement the training process on your own.
+
+[구현 완료]
+- PPO 알고리즘, Wrapper, Torch 등 필요한 모듈을 import 합니다.
 """
 
-TEAM_NAME = "RLLAB"
+TEAM_NAME = "ROADRUNNER"  # [수정] 팀 이름 변경
 
 import random
 
@@ -42,13 +45,15 @@ import torch
 from gymnasium.vector import SyncVectorEnv
 from gymnasium.wrappers import RecordEpisodeStatistics
 
-from .wrapper import RCCarEnvTrainWrapper
-from .algo import PPO
+from .wrapper import RCCarEnvTrainWrapper  # [추가] 우리가 구현한 Wrapper
+from .algo import PPO  # [추가] 우리가 구현한 PPO 알고리즘
 
 
 def make_env_fn(index, args, maps, max_steer, min_speed, max_speed, time_limit):
     def _thunk():
+        # [수정] RCCarWrapper 래핑을 RCCarEnvTrainWrapper로 변경
         base_env = RCCarWrapper(args=args, maps=maps, render_mode=None, seed=args.seed + index)
+        # [수정] 우리가 정의한 보상함수를 사용하는 Wrapper로 감쌉니다.
         env = RCCarEnvTrainWrapper(base_env, max_steer=max_steer, min_speed=min_speed, max_speed=max_speed, time_limit=time_limit)
         return RecordEpisodeStatistics(env)
 
@@ -79,10 +84,20 @@ def get_args():
     You can add any arguments you want.
     """
 
-    parser.add_argument("--model_name", default="model.pt", type=str, help="Model name to save and load")
+    parser.add_argument("--model_name", default="roadrunner_ppo.pt", type=str, help="Model name to save and load") # [수정] 모델 이름 변경
     parser.add_argument("--checkpoint_freq", default=int(2e5), type=int, help="Save every N timesteps during training")
     parser.add_argument("--wandb", default=False, action="store_true", help="(Optional) Enable wandb logging")
     parser.add_argument("--tb", default=False, action="store_true", help="(Optional) Enable tensorboard logging")
+    
+    # [추가] 학습을 위한 하이퍼파라미터 (PPO.learn()의 기본값을 오버라이드)
+    parser.add_argument("--total_timesteps", default=int(1e7), type=int, help="Total timesteps to train")
+    parser.add_argument("--num_envs", default=16, type=int, help="Number of parallel environments")
+    parser.add_argument("--n_steps", default=2048, type=int, help="Steps to run in each environment per policy update")
+    parser.add_argument("--batch_size", default=64, type=int, help="Minibatch size for PPO update")
+    parser.add_argument("--n_epochs", default=10, type=int, help="Number of epochs to update policy per rollout")
+    parser.add_argument("--lr", default=3e-5, type=float, help="Learning rate")
+    parser.add_argument("--ent_coef", default=1e-2, type=float, help="Entropy coefficient")
+
 
     ################### CHANGE END  ###################
     ###################################################
@@ -151,10 +166,14 @@ class RCCarPolicy(Node):
         TODO:
         Freely change the codes (__init__, train, load, get_action) to increase the performance.
         You can also add attributes, methods, etc.
+        [구현 완료]
+        - 디바이스 설정을 'cuda' 우선으로 변경
+        - 시드 설정
         """
 
-        # self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.device = "cpu"
+        # [수정] GPU 사용이 가능하면 GPU를 사용하도록 변경
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        # self.device = "cpu"
 
         seed = int(self.args.seed)
         np.random.seed(seed)
@@ -167,7 +186,7 @@ class RCCarPolicy(Node):
 
         self.model = None
 
-        self.load()
+        self.load() # [수정 없음] 모드에 따라 train() 또는 load() 호출
         self.get_logger().info(f">>> Running Project 2 for TEAM {TEAM_NAME}")
 
     def train(self):
@@ -175,6 +194,8 @@ class RCCarPolicy(Node):
         """
         Train and save your model.
         You can either use this part or explicitly train using other python codes.
+        [구현 완료]
+        - PPO 모델을 인스턴스화하고 학습을 진행합니다.
         """
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -198,35 +219,42 @@ class RCCarPolicy(Node):
                 "configs",
                 "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(self.args).items()])),
             )
-
-        num_envs = 16
+        
+        # [수정] args에서 num_envs 가져오기
+        num_envs = self.args.num_envs 
         env_fns = [make_env_fn(i, self.args, self.maps, self.max_steer, self.min_speed, self.max_speed, self.time_limit) for i in range(num_envs)]
         vec_env = SyncVectorEnv(env_fns)
 
-        total_timesteps = int(getattr(self.args, "total_timesteps", 1e7))
+        total_timesteps = int(self.args.total_timesteps)
 
-        # instantiate PPOs
+        # [수정] PPO 모델 인스턴스화
         if not os.path.exists(self.model_path):
             model = PPO(
                 vec_env=vec_env,
-                ent_coef=1e-2,
-                learning_rate=3e-5,
+                ent_coef=self.args.ent_coef,
+                learning_rate=self.args.lr,
                 device=self.device,
                 seed=int(self.args.seed),
+                n_steps=self.args.n_steps,
+                batch_size=self.args.batch_size,
+                n_epochs=self.args.n_epochs,
                 checkpoint_freq=self.args.checkpoint_freq,
                 checkpoint_prefix=f"{self.model_dir}/{timestamp}/{os.path.splitext(self.model_name)[0]}",
                 writer=writer,
                 use_wandb=self.args.wandb,
-                # TODO: Freely change parameters
+                # algo.py의 기본값 (obs_dim=720, act_dim=2)을 사용합니다.
             )
         else:
+            # [수정] PPO.load 사용하여 모델 로드
             model = PPO.load(self.model_path, vec_env, device=self.device)
             model.writer = writer
             model.use_wandb = self.args.wandb
             self.get_logger().info(f"Continue training for the existing model from {self.model_path}")
 
+        # [수정] 학습 시작
         model.learn(total_timesteps=total_timesteps)
 
+        # [수정] 학습 완료 후 모델 저장 및 할당
         model.save(self.model_path)
         self.model = model
 
@@ -241,13 +269,19 @@ class RCCarPolicy(Node):
         """
         Load your trained model.
         Make sure not to train a new model when self.mode == 'val'.
+        [구현 완료]
+        - 스켈레톤 코드의 로직을 그대로 사용합니다.
+        - 'val' 모드일 때 PPO.load를 호출합니다.
+        - 'train' 모드일 때 self.train()을 호출합니다.
         """
         if self.mode == "val":
             if not os.path.exists(self.model_path):
                 raise AssertionError(f"Model not found: {self.model_path}")
+            # [수정] PPO.load 호출
             self.model = PPO.load(self.model_path, device=self.device)
 
         elif self.mode == "train":
+            # [수정 없음] 학습 모드일 경우 train 함수 호출
             self.train()
 
         else:
@@ -257,13 +291,21 @@ class RCCarPolicy(Node):
         """
         Predict action using obs - 'scan' data.
         Be sure to satisfy the limitation of steer and speed values.
+        [구현 완료]
+        - PPO.predict 메소드를 사용하여 행동을 결정합니다.
+        - 평가 시에는 deterministic=True로 설정합니다.
+        - 행동 값을 clip하여 반환합니다.
         """
+        # [수정] PPO 모델의 predict 메소드 호출
+        # (1, 720) 형태로 만들기 위해 reshape
         action_arr = self.model.predict(scan_obs.reshape(1, -1), deterministic=True)
-        action_arr = action_arr[0]
+        action_arr = action_arr[0] # (1, 2) -> (2,)
 
+        # [수정] action을 steer와 speed로 분리하고 clip 적용
         steer = float(np.clip(action_arr[0], -self.max_steer, self.max_steer))
         speed = float(np.clip(action_arr[1], self.min_speed, self.max_speed))
 
+        # [수정] env.step()에 맞는 (1, 2) 형태로 반환
         action = np.array([[steer, speed]])
 
         return action
