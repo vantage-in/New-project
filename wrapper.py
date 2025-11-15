@@ -94,7 +94,7 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                 reward += 200.0
             # 4b. 실패 (충돌): 완주하지 못하고 종료되면(충돌) 매우 큰 페널티
             else:
-                reward -= 100.0
+                reward -= 50.0
         
         # (참고: truncated는 보통 시간 초과로 인한 종료를 의미하며, 이 경우엔 별도 페널티를 주지 않습니다.)
 

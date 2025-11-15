@@ -85,18 +85,18 @@ def get_args():
     """
 
     parser.add_argument("--model_name", default="roadrunner_ppo.pt", type=str, help="Model name to save and load") # [수정] 모델 이름 변경
-    parser.add_argument("--checkpoint_freq", default=int(2e5), type=int, help="Save every N timesteps during training")
+    parser.add_argument("--checkpoint_freq", default=int(1e6), type=int, help="Save every N timesteps during training")
     parser.add_argument("--wandb", default=False, action="store_true", help="(Optional) Enable wandb logging")
     parser.add_argument("--tb", default=False, action="store_true", help="(Optional) Enable tensorboard logging")
     
     # [추가] 학습을 위한 하이퍼파라미터 (PPO.learn()의 기본값을 오버라이드)
     parser.add_argument("--total_timesteps", default=int(1e7), type=int, help="Total timesteps to train")
-    parser.add_argument("--num_envs", default=16, type=int, help="Number of parallel environments")
+    parser.add_argument("--num_envs", default=24, type=int, help="Number of parallel environments")
     parser.add_argument("--n_steps", default=2048, type=int, help="Steps to run in each environment per policy update")
-    parser.add_argument("--batch_size", default=64, type=int, help="Minibatch size for PPO update")
+    parser.add_argument("--batch_size", default=256, type=int, help="Minibatch size for PPO update")
     parser.add_argument("--n_epochs", default=10, type=int, help="Number of epochs to update policy per rollout")
     parser.add_argument("--lr", default=3e-5, type=float, help="Learning rate")
-    parser.add_argument("--ent_coef", default=1e-2, type=float, help="Entropy coefficient")
+    parser.add_argument("--ent_coef", default=1e-3, type=float, help="Entropy coefficient")
 
 
     ################### CHANGE END  ###################
