@@ -93,7 +93,7 @@ def get_args():
     parser.add_argument("--total_timesteps", default=int(1e7), type=int, help="Total timesteps to train")
     parser.add_argument("--num_envs", default=18, type=int, help="Number of parallel environments")
     parser.add_argument("--n_steps", default=2048, type=int, help="Steps to run in each environment per policy update")
-    parser.add_argument("--batch_size", default=256, type=int, help="Minibatch size for PPO update")
+    parser.add_argument("--batch_size", default=64, type=int, help="Minibatch size for PPO update")
     parser.add_argument("--n_epochs", default=10, type=int, help="Number of epochs to update policy per rollout")
     parser.add_argument("--lr", default=3e-5, type=float, help="Learning rate")
     parser.add_argument("--ent_coef", default=1e-3, type=float, help="Entropy coefficient")
