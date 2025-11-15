@@ -91,7 +91,7 @@ def get_args():
     
     # [추가] 학습을 위한 하이퍼파라미터 (PPO.learn()의 기본값을 오버라이드)
     parser.add_argument("--total_timesteps", default=int(1e7), type=int, help="Total timesteps to train")
-    parser.add_argument("--num_envs", default=24, type=int, help="Number of parallel environments")
+    parser.add_argument("--num_envs", default=18, type=int, help="Number of parallel environments")
     parser.add_argument("--n_steps", default=2048, type=int, help="Steps to run in each environment per policy update")
     parser.add_argument("--batch_size", default=256, type=int, help="Minibatch size for PPO update")
     parser.add_argument("--n_epochs", default=10, type=int, help="Number of epochs to update policy per rollout")
