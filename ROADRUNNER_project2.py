@@ -54,7 +54,7 @@ def make_env_fn(index, args, maps, max_steer, min_speed, max_speed, time_limit):
         # [수정] RCCarWrapper 래핑을 RCCarEnvTrainWrapper로 변경
         base_env = RCCarWrapper(args=args, maps=maps, render_mode=None, seed=args.seed + index)
         # [수정] 우리가 정의한 보상함수를 사용하는 Wrapper로 감쌉니다.
-        env = RCCarEnvTrainWrapper(base_env, max_steer=max_steer, min_speed=min_speed, max_speed=max_speed, time_limit=time_limit)
+        env = RCCarEnvTrainWrapper(base_env, max_steer=max_steer, min_speed=min_speed, max_speed=max_speed, time_limit=time_limit, mode=args.mode)
         return RecordEpisodeStatistics(env)
 
     return _thunk
@@ -85,7 +85,7 @@ def get_args():
     """
 
     parser.add_argument("--model_name", default="roadrunner_ppo.pt", type=str, help="Model name to save and load") # [수정] 모델 이름 변경
-    parser.add_argument("--checkpoint_freq", default=int(2e5), type=int, help="Save every N timesteps during training")
+    parser.add_argument("--checkpoint_freq", default=int(5e5), type=int, help="Save every N timesteps during training")
     parser.add_argument("--wandb", default=False, action="store_true", help="(Optional) Enable wandb logging")
     parser.add_argument("--tb", default=False, action="store_true", help="(Optional) Enable tensorboard logging")
     
@@ -93,10 +93,10 @@ def get_args():
     parser.add_argument("--total_timesteps", default=int(1e7), type=int, help="Total timesteps to train")
     parser.add_argument("--num_envs", default=16, type=int, help="Number of parallel environments")
     parser.add_argument("--n_steps", default=2048, type=int, help="Steps to run in each environment per policy update")
-    parser.add_argument("--batch_size", default=32, type=int, help="Minibatch size for PPO update")
+    parser.add_argument("--batch_size", default=64, type=int, help="Minibatch size for PPO update")
     parser.add_argument("--n_epochs", default=10, type=int, help="Number of epochs to update policy per rollout")
     parser.add_argument("--lr", default=3e-5, type=float, help="Learning rate")
-    parser.add_argument("--ent_coef", default=1e-4, type=float, help="Entropy coefficient")
+    parser.add_argument("--ent_coef", default=1e-6, type=float, help="Entropy coefficient")
 
 
     ################### CHANGE END  ###################
@@ -250,6 +250,42 @@ class RCCarPolicy(Node):
             model.writer = writer
             model.use_wandb = self.args.wandb
             self.get_logger().info(f"Continue training for the existing model from {self.model_path}")
+            
+            # 2. 로드된 모델 객체에 'self.args'의 새 하이퍼파라미터를 강제로 덮어씌웁니다.
+            self.get_logger().warn("[OVERWRITE] Forcing new hyperparameters on loaded model...")
+
+            # 덮어쓸 파라미터 딕셔너리 생성
+            # (PPO.__init__의 인자 이름과 self.args의 이름을 매핑)
+            new_params = {
+                "learning_rate": self.args.lr,
+                "ent_coef": self.args.ent_coef,
+                "n_steps": self.args.n_steps,
+                "batch_size": self.args.batch_size,
+                "n_epochs": self.args.n_epochs,
+                "checkpoint_freq": self.args.checkpoint_freq,
+                # --- 필요시 다른 하이퍼파라미터도 여기에 추가 ---
+                # "gamma": self.args.gamma,
+                # "gae_lambda": self.args.gae_lambda,
+                # "clip_range": self.args.clip_range,
+                # "vf_coef": self.args.vf_coef,
+                # "max_grad_norm": self.args.max_grad_norm,
+            }
+
+            # 3. 모델 객체의 속성(model.batch_size)과
+            #    다음 저장을 위한 kwargs(model.kwargs['batch_size'])를 모두 덮어씁니다.
+            for key, value in new_params.items():
+                if hasattr(model, key):
+                    setattr(model, key, value) # model.batch_size = 64
+                    model.kwargs[key] = value  # model.kwargs['batch_size'] = 64
+                    self.get_logger().info(f"  > Overwrote '{key}' to {value}")
+                else:
+                    self.get_logger().warn(f"  > Cannot find attribute '{key}' to overwrite.")
+            
+            # 4. 체크포인트 저장 경로도 새 타임스탬프로 덮어씁니다. (이전 수정 사항)
+            new_prefix = f"{self.model_dir}/{timestamp}/{os.path.splitext(self.model_name)[0]}"
+            model.checkpoint_prefix = new_prefix
+            model.kwargs["checkpoint_prefix"] = new_prefix
+            self.get_logger().info(f"  > Overwrote 'checkpoint_prefix' to {new_prefix}")
 
         # [수정] 학습 시작
         model.learn(total_timesteps=total_timesteps)

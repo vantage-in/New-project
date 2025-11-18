@@ -11,13 +11,14 @@ feel free to modify or replace any part of it.
 
 
 class RCCarEnvTrainWrapper(gym.Wrapper):
-    def __init__(self, base_env, max_steer, min_speed, max_speed, time_limit):
+    def __init__(self, base_env, max_steer, min_speed, max_speed, time_limit, mode):
         super().__init__(base_env)
         self.base_env = base_env
         self.max_steer = max_steer
         self.min_speed = min_speed
         self.max_speed = max_speed
         self.time_limit = time_limit
+        self.mode = mode
 
         # perform one reset to infer scan size and set spaces
         # (스켈레톤 코드 원본)
@@ -42,9 +43,9 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         self.center_lidar_idx = 359
         
         # --- [추가] 헤딩 리워드 계수 ---
-        self.straight_reward_coeff = 0.5  # 직진 코스 보상 가중치
+        self.straight_reward_coeff = 1.0  # 직진 코스 보상 가중치
         self.straight_penalty_coeff = 1.0 # 직진 코스 페널티 가중치
-        self.corner_reward_coeff = 0.5    # 코너 코스 보상 가중치
+        self.corner_reward_coeff = 1.0    # 코너 코스 보상 가중치
         self.corner_penalty_coeff = 1.0   # 코너 코스 페널티 가중치
         
 
@@ -73,7 +74,6 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         
         # Lidar 최대값과 동일한 모든 인덱스를 찾습니다.
         max_indices = np.where(scan == max_dist)[0]
-        
         if len(max_indices) == 0: 
             max_idx = self.center_lidar_idx
         else:
@@ -96,21 +96,21 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                 cause_string = f"Front Penalty (-{penalty:.2f})"
                 
             # 1b. 최대 거리의 중앙(max_idx)이 정면(359)에 가까울수록 보상
-            reward_range_half = 30 # (359 +/- 30) -> 329 ~ 389
+            reward_range_half = 10 # (359 +/- 20) -> 339 ~ 379
             idx_diff = abs(max_idx - self.center_lidar_idx)
             
             if idx_diff < reward_range_half:
                 bonus = self.straight_reward_coeff * ((reward_range_half - idx_diff) / reward_range_half)
                 heading_reward += bonus
                 cause_string = f"Center Bonus (+{bonus:.2f})"
-            else:
+            elif cause_string == "None":
                 cause_string = "Straight (Neutral)" # 보상/페널티 범위 밖
                 
         else:
             # === 2. 코너 코스 로직 ===
             
             diffs = np.abs(np.diff(scan))
-            frontier_indices = np.where(diffs >= 2.0)[0]
+            frontier_indices = np.where(diffs >= 1.0)[0]
 
             if len(frontier_indices) > 0:
                 frontiers = []
@@ -126,19 +126,15 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                 if scan[idx_a] < scan[idx_b]:
                     idx_inner = idx_a # 더 가까운 포인트 (인코스)
                     idx_outer = idx_b
-                else:
-                    idx_inner = idx_b
-                    idx_outer = idx_a
-                    
-                if idx_inner < self.center_lidar_idx:
+
                     # === 2A. 좌회전 코스 ===
                     course_type = "Left Corner"
-                    if max_idx <= idx_inner:
+                    if self.center_lidar_idx <= idx_inner:
                         heading_reward -= self.corner_penalty_coeff * 1.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
-                        reward_range_corner = 40 
-                        idx_diff_corner = max_idx - idx_outer
+                        reward_range_corner = 20 
+                        idx_diff_corner = self.center_lidar_idx - idx_outer
                         if 0 <= idx_diff_corner < reward_range_corner:
                             bonus = self.corner_reward_coeff * ((reward_range_corner - idx_diff_corner) / reward_range_corner)
                             heading_reward += bonus
@@ -149,14 +145,17 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                         else:
                             cause_string = "Corner (Neutral)"
                 else:
+                    idx_inner = idx_b
+                    idx_outer = idx_a
+
                     # === 2B. 우회전 코스 ===
                     course_type = "Right Corner"
-                    if max_idx >= idx_inner:
+                    if self.center_lidar_idx >= idx_inner:
                         heading_reward -= self.corner_penalty_coeff * 1.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
-                        reward_range_corner = 40 
-                        idx_diff_corner = idx_outer - max_idx 
+                        reward_range_corner = 20 
+                        idx_diff_corner = idx_outer - self.center_lidar_idx
                         if 0 <= idx_diff_corner < reward_range_corner:
                             bonus = self.corner_reward_coeff * ((reward_range_corner - idx_diff_corner) / reward_range_corner)
                             heading_reward += bonus
@@ -166,6 +165,7 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                             cause_string = f"Corner Outer Penalty (-{self.corner_penalty_coeff * 0.5:.2f})"
                         else:
                             cause_string = "Corner (Neutral)"
+                    
             else:
                 course_type = "Corner (No Frontier)"
                 cause_string = "No Frontier Found"
@@ -178,6 +178,37 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
             'cause': cause_string
         }
         return heading_reward, debug_info
+    
+    def _generate_debug_log(self, reward_components, debug_info):
+        """
+        [새 함수] 
+        val 모드에서만 호출되는 디버그 로그 생성 및 출력 함수
+        """
+        
+        # 보상 원인 문자열 리스트 생성
+        reward_causes = []
+        reward_causes.append(f"Base: {reward_components['base']:.2f}")
+        
+        if reward_components['wp'] != 0.0:
+            reward_causes.append(f"Waypoint: +{reward_components['wp']:.2f}")
+            
+        if reward_components['heading'] != 0.0:
+            reward_causes.append(f"Heading: {reward_components['heading']:.2f} ({debug_info['cause']})")
+            
+        if reward_components['terminal'] != 0.0:
+            if reward_components['terminal'] > 0:
+                reward_causes.append(f"Terminal: +{reward_components['terminal']:.2f} (Success)")
+            else:
+                reward_causes.append(f"Terminal: {reward_components['terminal']:.2f} (Collision)")
+
+        # 최종 디버그 문자열 출력
+        debug_str = (
+            f"[Debug] Step: {self.elapsed_steps} | "
+            f"Course: {debug_info['course']} (Classify Idx: {debug_info['max_idx_FOR_CLASSIFICATION']}, Dist: {debug_info['max_dist']:.2f}) | "
+            f"Final Reward: {reward_components['total']:.2f} | "
+            f"Causes: {', '.join(reward_causes)}"
+        )
+        print(debug_str)
 
     def step(self, action):
         # [구현 완료] 
@@ -208,12 +239,13 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         # 2. 속도 보상: '빠르게' 완주하도록 속도에 비례하는 보상
         # 속도(speed)가 높을수록 보상이 커집니다.
         reward += speed * 0.1
+        base_reward = reward
 
         # 3. 진행 보상: 웨이포인트를 통과할 때마다 큰 보상
         next_waypoint = int(info.get("waypoint", 0))
         if next_waypoint > self.current_waypoint:
             # 새로 통과한 웨이포인트 수만큼 큰 보상을 줍니다.
-            wp_reward = 10.0 * (next_waypoint - self.current_waypoint)
+            wp_reward = 20.0 * (next_waypoint - self.current_waypoint)
             reward += wp_reward
             reward_causes.append(f"Waypoint: +{wp_reward:.2f}")
             self.current_waypoint = next_waypoint
@@ -229,24 +261,25 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         if terminate:
             # 4a. 성공 (완주): 맵을 완주(웨이포인트 20개 통과)하면 매우 큰 보상
             if info.get("waypoint", 0) == 20:
-                term_reward = 50.0
+                term_reward = 100.0
                 reward += term_reward
                 reward_causes.append(f"Terminal: +{term_reward:.2f} (Success)")
             # 4b. 실패 (충돌): 완주하지 못하고 종료되면(충돌) 매우 큰 페널티
             else:
-                term_penalty = -50.0
-                reward += term_penalty
-                reward_causes.append(f"Terminal: {term_penalty:.2f} (Collision)")
+                term_reward = -100.0
+                reward += term_reward
+                reward_causes.append(f"Terminal: {term_reward:.2f} (Collision)")
 
-        # --- [추가] 디버그 최종 출력 ---
-        debug_str = (
-            f"[Debug] Step: {self.elapsed_steps} | "
-            f"Course: {debug_info['course']} (Idx: {debug_info['max_idx']}, Dist: {debug_info['max_dist']:.2f}) | "
-            f"Final Reward: {reward:.2f} | "
-            f"Causes: {', '.join(reward_causes)}"
-        )
-        print(debug_str)
-        # --- [디버그 끝] ---
+        if self.mode == "val":
+            # train 모드에서는 이 함수가 호출되지 않아 오버헤드 없음
+            reward_components = {
+                'base': base_reward,
+                'wp': wp_reward,
+                'heading': heading_reward,
+                'terminal': term_reward,
+                'total': reward
+            }
+            self._generate_debug_log(reward_components, debug_info)
         
         # (참고: truncated는 보통 시간 초과로 인한 종료를 의미하며, 이 경우엔 별도 페널티를 주지 않습니다.)
 

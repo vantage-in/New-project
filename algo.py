@@ -36,7 +36,7 @@ class PPO:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_range: float = 0.2,
-        vf_coef: float = 1.0,
+        vf_coef: float = 2.0,
         max_grad_norm: float = 0.5,
         checkpoint_freq: int = int(1e6),
         checkpoint_prefix: Optional[str] = None,
