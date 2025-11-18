@@ -67,7 +67,8 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
 
     def _calculate_heading_reward(self, scan):
         """
-        [수정된 함수] 디버깅을 위해 (heading_reward, debug_info)를 반환
+        [추가] wrapper.py에서 가져온 헤딩 보상 계산 로직 (검증용)
+         [수정] 2025-11-18 요청사항 반영
         """
         
         max_dist = np.max(scan)
@@ -84,7 +85,7 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         course_type = "Unknown"
         cause_string = "None" # 디버깅을 위한 리워드 원인
 
-        if max_dist >= 10.0:
+        if max_dist >= 9.0:
             # === 1. 직진 코스 로직 ===
             course_type = "Straight"
             
@@ -94,17 +95,92 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                 penalty = self.straight_penalty_coeff * (5.0 - front_dist)
                 heading_reward -= penalty
                 cause_string = f"Front Penalty (-{penalty:.2f})"
+            else:
+                diffs_straight = np.abs(np.diff(scan))
+                frontier_indices_straight = np.where(diffs_straight >= 2.5)[0]
+
+                if max_dist < 20.0 and len(frontier_indices_straight) > 0:
+                # --- [A] 기울어진 직진 (Leaning Straight) 로직 ---
+
+                    frontiers = []
+                    for i in frontier_indices_straight:
+                        dist_val = max(scan[i], scan[i+1])
+                        frontiers.append((i, dist_val))
+                    best_frontier_idx = max(frontiers, key=lambda f: f[1])[0]
                 
-            # 1b. 최대 거리의 중앙(max_idx)이 정면(359)에 가까울수록 보상
-            reward_range_half = 10 # (359 +/- 20) -> 339 ~ 379
-            idx_diff = abs(max_idx - self.center_lidar_idx)
-            
-            if idx_diff < reward_range_half:
-                bonus = self.straight_reward_coeff * ((reward_range_half - idx_diff) / reward_range_half)
-                heading_reward += bonus
-                cause_string = f"Center Bonus (+{bonus:.2f})"
-            elif cause_string == "None":
-                cause_string = "Straight (Neutral)" # 보상/페널티 범위 밖
+                    idx_a = best_frontier_idx
+                    idx_b = best_frontier_idx + 1
+
+                    if scan[idx_a] < scan[idx_b]:
+                        # (A-1. 좌-기울)
+                        course_type = "Straight-Left"
+                        idx_inner = min(idx_a + 10, 718)
+                        idx_outer = min(idx_b + 10, 719)
+                        
+                        if self.center_lidar_idx <= idx_inner:
+                            # [수정] 약한 inner 페널티 (코너의 50%)
+                            penalty = self.corner_penalty_coeff * 0.5 
+                            heading_reward -= penalty
+                            cause_string = f"Straight-Inner Penalty (-{penalty:.2f})"
+                        else:
+                            # [새 로직] 40 Flat + 40 Linear
+                            flat_range = 40       # (0-39)
+                            linear_range_end = 80 # (40-79)
+                            idx_diff_corner = self.center_lidar_idx - idx_outer
+
+                            if 0 <= idx_diff_corner < flat_range:
+                                bonus = self.corner_reward_coeff * 1.0
+                                heading_reward += bonus
+                                cause_string = f"Straight Bonus (Flat) (+{bonus:.2f})"
+                            elif flat_range <= idx_diff_corner < linear_range_end:
+                                linear_range_len = linear_range_end - flat_range # 40
+                                bonus = self.corner_reward_coeff * ((linear_range_end - idx_diff_corner) / linear_range_len)
+                                heading_reward += bonus
+                                cause_string = f"Straight Bonus (Linear) (+{bonus:.2f})"
+                            elif cause_string == "None": # 5m 페널티도 안 받은 경우
+                                cause_string = "Straight-Left (Neutral)"
+                    
+                    else:
+                        # (A-2. 우-기울)
+                        course_type = "Straight-Right"
+                        idx_inner = max(idx_b - 10, 1)
+                        idx_outer = max(idx_a - 10, 0)
+
+                        if self.center_lidar_idx >= idx_inner:
+                            # [수정] 약한 inner 페널티 (코너의 50%)
+                            penalty = self.corner_penalty_coeff * 0.5
+                            heading_reward -= penalty
+                            cause_string = f"Straight-Inner Penalty (-{penalty:.2f})"
+                        else:
+                            # [새 로직] 40 Flat + 40 Linear
+                            flat_range = 40
+                            linear_range_end = 80
+                            idx_diff_corner = idx_outer - self.center_lidar_idx
+
+                            if 0 <= idx_diff_corner < flat_range:
+                                bonus = self.corner_reward_coeff * 1.0
+                                heading_reward += bonus
+                                cause_string = f"Straight Bonus (Flat) (+{bonus:.2f})"
+                            elif flat_range <= idx_diff_corner < linear_range_end:
+                                linear_range_len = linear_range_end - flat_range # 40
+                                bonus = self.corner_reward_coeff * ((linear_range_end - idx_diff_corner) / linear_range_len)
+                                heading_reward += bonus
+                                cause_string = f"Straight Bonus (Linear) (+{bonus:.2f})"
+                            elif cause_string == "None":
+                                cause_string = "Straight-Right (Neutral)"
+                else:
+                    # 1b. 최대 거리의 중앙(max_idx)이 정면(359)에 가까울수록 보상
+                    course_type = "Straight-Center"
+                    reward_range_half = 60 # [수정] 10 -> 20 (359 +/- 20) -> 339 ~ 379
+                    idx_diff = abs(max_idx - self.center_lidar_idx)
+                    
+                    if idx_diff < reward_range_half:
+                        # [수정] 범위가 넓어진 만큼 외각에서는 약한 보상을 받게 됨
+                        bonus = self.straight_reward_coeff * ((reward_range_half - idx_diff) / reward_range_half)
+                        heading_reward += bonus
+                        cause_string = f"Center Bonus (+{bonus:.2f})"
+                    elif cause_string == "None":
+                        cause_string = "Straight (Neutral)" # 보상/페널티 범위 밖
                 
         else:
             # === 2. 코너 코스 로직 ===
@@ -124,8 +200,8 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                 idx_b = best_frontier_idx + 1
                 
                 if scan[idx_a] < scan[idx_b]:
-                    idx_inner = idx_a # 더 가까운 포인트 (인코스)
-                    idx_outer = idx_b
+                    idx_inner = min(idx_a + 10, 718)# 더 가까운 포인트 (인코스)
+                    idx_outer = min(idx_b + 10, 719)
 
                     # === 2A. 좌회전 코스 ===
                     course_type = "Left Corner"
@@ -133,20 +209,34 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                         heading_reward -= self.corner_penalty_coeff * 1.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
-                        reward_range_corner = 20 
+                        reward_range_corner = 100 # [수정] 20 -> 40 (보상 범위 2배)
+                        flat_reward_range = 40
+                        linear_reward_end = reward_range_corner
+                        neutral_range_corner = 60 # [추가] 페널티 전 중립 구간 (20)
+                        
                         idx_diff_corner = self.center_lidar_idx - idx_outer
-                        if 0 <= idx_diff_corner < reward_range_corner:
-                            bonus = self.corner_reward_coeff * ((reward_range_corner - idx_diff_corner) / reward_range_corner)
+                        
+                        if 0 <= idx_diff_corner < flat_reward_range:
+                            # 1. Flat 구간 (0 ~ 19): 최대 보상
+                            bonus = self.corner_reward_coeff * 1.0
                             heading_reward += bonus
-                            cause_string = f"Corner Bonus (+{bonus:.2f})"
-                        elif idx_diff_corner >= reward_range_corner:
+                            cause_string = f"Corner Bonus (Flat) (+{bonus:.2f})"
+                        elif flat_reward_range <= idx_diff_corner < linear_reward_end:
+                            # 2. Linear 구간 (20 ~ 39): 1.0 -> 0.0 으로 선형 감소
+                            linear_range_len = linear_reward_end - flat_reward_range # 20
+                            bonus = self.corner_reward_coeff * ((linear_reward_end - idx_diff_corner) / linear_range_len)
+                            heading_reward += bonus
+                            cause_string = f"Corner Bonus (Linear) (+{bonus:.2f})"
+                        elif linear_reward_end <= idx_diff_corner < (linear_reward_end + neutral_range_corner): # [추가] (40 ~ 59)
+                            cause_string = "Corner (Neutral)" # 중립 구간
+                        elif idx_diff_corner >= (linear_reward_end + neutral_range_corner): # [수정] (>= 60)
                             heading_reward -= self.corner_penalty_coeff * 0.5 
                             cause_string = f"Corner Outer Penalty (-{self.corner_penalty_coeff * 0.5:.2f})"
                         else:
                             cause_string = "Corner (Neutral)"
                 else:
-                    idx_inner = idx_b
-                    idx_outer = idx_a
+                    idx_inner = max(idx_b - 10, 1)
+                    idx_outer = max(idx_a - 10, 0)
 
                     # === 2B. 우회전 코스 ===
                     course_type = "Right Corner"
@@ -154,13 +244,28 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                         heading_reward -= self.corner_penalty_coeff * 1.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
-                        reward_range_corner = 20 
+                        # [수정] 좌회전과 동일한 구조로 변경
+                        reward_range_corner = 100 # [수정] 80 -> 100
+                        flat_reward_range = 40    # [추가]
+                        linear_reward_end = reward_range_corner
+                        neutral_range_corner = 60 # [수정] 80 -> 60
+                        
                         idx_diff_corner = idx_outer - self.center_lidar_idx
-                        if 0 <= idx_diff_corner < reward_range_corner:
-                            bonus = self.corner_reward_coeff * ((reward_range_corner - idx_diff_corner) / reward_range_corner)
+                        
+                        if 0 <= idx_diff_corner < flat_reward_range:
+                            # 1. Flat 구간 (0 ~ 39): 최대 보상
+                            bonus = self.corner_reward_coeff * 1.0
                             heading_reward += bonus
-                            cause_string = f"Corner Bonus (+{bonus:.2f})"
-                        elif idx_diff_corner >= reward_range_corner:
+                            cause_string = f"Corner Bonus (Flat) (+{bonus:.2f})"
+                        elif flat_reward_range <= idx_diff_corner < linear_reward_end:
+                            # 2. Linear 구간 (40 ~ 99): 1.0 -> 0.0 으로 선형 감소
+                            linear_range_len = linear_reward_end - flat_reward_range # 60
+                            bonus = self.corner_reward_coeff * ((linear_reward_end - idx_diff_corner) / linear_range_len)
+                            heading_reward += bonus
+                            cause_string = f"Corner Bonus (Linear) (+{bonus:.2f})"
+                        elif linear_reward_end <= idx_diff_corner < (linear_reward_end + neutral_range_corner): # (100 ~ 159)
+                            cause_string = "Corner (Neutral)" # 중립 구간
+                        elif idx_diff_corner >= (linear_reward_end + neutral_range_corner): # (>= 160)
                             heading_reward -= self.corner_penalty_coeff * 0.5
                             cause_string = f"Corner Outer Penalty (-{self.corner_penalty_coeff * 0.5:.2f})"
                         else:
@@ -169,6 +274,7 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
             else:
                 course_type = "Corner (No Frontier)"
                 cause_string = "No Frontier Found"
+                heading_reward -= 5.0
 
         # 디버깅 정보를 딕셔너리로 반환
         debug_info = {
@@ -239,6 +345,7 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         # 2. 속도 보상: '빠르게' 완주하도록 속도에 비례하는 보상
         # 속도(speed)가 높을수록 보상이 커집니다.
         reward += speed * 0.1
+        reward -= abs(steer) * 0.05
         base_reward = reward
 
         # 3. 진행 보상: 웨이포인트를 통과할 때마다 큰 보상
