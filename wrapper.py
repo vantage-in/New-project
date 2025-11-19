@@ -8,7 +8,7 @@ from gymnasium.spaces import Box
 TODO: This skeleton code serves as a guideline;
 feel free to modify or replace any part of it.
 """
-
+from collections import deque
 
 class RCCarEnvTrainWrapper(gym.Wrapper):
     def __init__(self, base_env, max_steer, min_speed, max_speed, time_limit, mode):
@@ -36,6 +36,30 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         [구현 완료] 
         - 진행 상황(웨이포인트)을 추적하기 위한 변수를 추가합니다.
         """
+        self.MAX_LIDAR_DIST = 30.0
+
+        # [설정 2] Frame Stacking & Stride 설정
+        self.stack_num = 4          # 신경망에 들어갈 프레임 수
+        self.stack_interval = 6     # 프레임 간격 (Stride) -> 6이면 0.15초 간격
+        self.downsample_interval = 4 # 720 -> 180 다운샘플링
+
+        # 버퍼 크기 계산: (4개 * 3간격) - 2(인덱스 보정) = 10개 이상의 과거가 필요
+        # 넉넉하게 maxlen 설정
+        self.buffer_maxlen = (self.stack_num * self.stack_interval)
+        self.frames = deque(maxlen=self.buffer_maxlen)
+
+        # 관측 공간 정의 (180 * 4 = 720 dim)
+        self.raw_scan_len = 720
+        self.single_frame_dim = self.raw_scan_len  // self.downsample_interval
+        self.obs_dim = self.single_frame_dim * self.stack_num
+        
+        self.observation_space = Box(
+            low=0.0, high=1.0, # 정규화했으므로 0~1
+            shape=(self.obs_dim,), 
+            dtype=np.float32
+        )
+
+
         self.current_waypoint = 0
 
         # Lidar 스캔 배열은 720개입니다 (0~719)
@@ -48,6 +72,33 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         self.corner_reward_coeff = 1.0    # 코너 코스 보상 가중치
         self.corner_penalty_coeff = 1.0   # 코너 코스 페널티 가중치
         
+    def _process_scan(self, scan):
+        """Lidar 1개 프레임 처리: 다운샘플링 -> 정규화"""
+        # 1. 다운샘플링 (720 -> 180)
+        processed = scan[::self.downsample_interval]
+        
+        # 2. 정규화 (0.0 ~ 1.0) [Normalize FIRST]
+        processed = processed / self.MAX_LIDAR_DIST
+        return np.clip(processed, 0.0, 1.0)
+
+    def _get_stacked_obs(self):
+        """버퍼에서 Stride 간격으로 꺼내서 합치기"""
+        # 현재 버퍼에 있는 프레임들을 리스트로 변환 (오래된 것 -> 최신 순)
+        buffer_list = list(self.frames)
+        
+        # 뒤에서부터 interval 간격으로 4개 추출
+        # 예: [-1(현재), -4, -7, -10]
+        selected_frames = buffer_list[::-1][::self.stack_interval][:self.stack_num]
+        
+        # 시간 순서를 맞추기 위해 다시 뒤집음 (과거 -> 현재)
+        # (MLP라 순서가 크게 상관없지만, 일관성을 위해)
+        selected_frames = selected_frames[::-1]
+        
+        # 만약 버퍼가 아직 꽉 차지 않았다면(초기화 직후), 제일 첫 프레임으로 채움
+        while len(selected_frames) < self.stack_num:
+            selected_frames.insert(0, selected_frames[0])
+            
+        return np.concatenate(selected_frames, axis=0)
 
     def reset(self, **kwargs):
         # init waypoint tracking
@@ -63,7 +114,14 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         """
         self.current_waypoint = 0
 
-        return scan, info
+        # 첫 프레임 처리 및 버퍼 채우기
+        processed = self._process_scan(scan)
+        
+        # 초기 상태에서는 같은 프레임으로 버퍼를 가득 채움 (Warm-up)
+        for _ in range(self.buffer_maxlen):
+            self.frames.append(processed)
+
+        return self._get_stacked_obs(), info
 
     def _calculate_heading_reward(self, scan):
         """
@@ -119,13 +177,13 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                         
                         if self.center_lidar_idx <= idx_inner:
                             # [수정] 약한 inner 페널티 (코너의 50%)
-                            penalty = self.corner_penalty_coeff * 0.5 
+                            penalty = self.corner_penalty_coeff * 3.0
                             heading_reward -= penalty
                             cause_string = f"Straight-Inner Penalty (-{penalty:.2f})"
                         else:
                             # [새 로직] 40 Flat + 40 Linear
                             flat_range = 40       # (0-39)
-                            linear_range_end = 80 # (40-79)
+                            linear_range_end = 120 # (40-79)
                             idx_diff_corner = self.center_lidar_idx - idx_outer
 
                             if 0 <= idx_diff_corner < flat_range:
@@ -148,13 +206,13 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
 
                         if self.center_lidar_idx >= idx_inner:
                             # [수정] 약한 inner 페널티 (코너의 50%)
-                            penalty = self.corner_penalty_coeff * 0.5
+                            penalty = self.corner_penalty_coeff * 3.0
                             heading_reward -= penalty
                             cause_string = f"Straight-Inner Penalty (-{penalty:.2f})"
                         else:
                             # [새 로직] 40 Flat + 40 Linear
                             flat_range = 40
-                            linear_range_end = 80
+                            linear_range_end = 120
                             idx_diff_corner = idx_outer - self.center_lidar_idx
 
                             if 0 <= idx_diff_corner < flat_range:
@@ -171,12 +229,12 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                 else:
                     # 1b. 최대 거리의 중앙(max_idx)이 정면(359)에 가까울수록 보상
                     course_type = "Straight-Center"
-                    reward_range_half = 60 # [수정] 10 -> 20 (359 +/- 20) -> 339 ~ 379
+                    reward_range_half = 40 # [수정] 10 -> 20 (359 +/- 20) -> 339 ~ 379
                     idx_diff = abs(max_idx - self.center_lidar_idx)
                     
                     if idx_diff < reward_range_half:
                         # [수정] 범위가 넓어진 만큼 외각에서는 약한 보상을 받게 됨
-                        bonus = self.straight_reward_coeff * ((reward_range_half - idx_diff) / reward_range_half)
+                        bonus = 3.0 * self.straight_reward_coeff * ((reward_range_half - idx_diff) / reward_range_half)
                         heading_reward += bonus
                         cause_string = f"Center Bonus (+{bonus:.2f})"
                     elif cause_string == "None":
@@ -206,13 +264,13 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                     # === 2A. 좌회전 코스 ===
                     course_type = "Left Corner"
                     if self.center_lidar_idx <= idx_inner:
-                        heading_reward -= self.corner_penalty_coeff * 1.0
+                        heading_reward -= self.corner_penalty_coeff * 3.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
-                        reward_range_corner = 100 # [수정] 20 -> 40 (보상 범위 2배)
+                        reward_range_corner = 80 # [수정] 20 -> 40 (보상 범위 2배)
                         flat_reward_range = 40
                         linear_reward_end = reward_range_corner
-                        neutral_range_corner = 60 # [추가] 페널티 전 중립 구간 (20)
+                        neutral_range_corner = 80 # [추가] 페널티 전 중립 구간 (20)
                         
                         idx_diff_corner = self.center_lidar_idx - idx_outer
                         
@@ -241,14 +299,14 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
                     # === 2B. 우회전 코스 ===
                     course_type = "Right Corner"
                     if self.center_lidar_idx >= idx_inner:
-                        heading_reward -= self.corner_penalty_coeff * 1.0
+                        heading_reward -= self.corner_penalty_coeff * 3.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
                         # [수정] 좌회전과 동일한 구조로 변경
-                        reward_range_corner = 100 # [수정] 80 -> 100
+                        reward_range_corner = 80 # [수정] 80 -> 100
                         flat_reward_range = 40    # [추가]
                         linear_reward_end = reward_range_corner
-                        neutral_range_corner = 60 # [수정] 80 -> 60
+                        neutral_range_corner = 80 # [수정] 80 -> 60
                         
                         idx_diff_corner = idx_outer - self.center_lidar_idx
                         
@@ -345,14 +403,14 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
         # 2. 속도 보상: '빠르게' 완주하도록 속도에 비례하는 보상
         # 속도(speed)가 높을수록 보상이 커집니다.
         reward += speed * 0.1
-        reward -= abs(steer) * 0.05
+        reward -= abs(steer) * 1.0
         base_reward = reward
 
         # 3. 진행 보상: 웨이포인트를 통과할 때마다 큰 보상
         next_waypoint = int(info.get("waypoint", 0))
         if next_waypoint > self.current_waypoint:
             # 새로 통과한 웨이포인트 수만큼 큰 보상을 줍니다.
-            wp_reward = 20.0 * (next_waypoint - self.current_waypoint)
+            wp_reward = 30.0 * (next_waypoint - self.current_waypoint)
             reward += wp_reward
             reward_causes.append(f"Waypoint: +{wp_reward:.2f}")
             self.current_waypoint = next_waypoint
@@ -392,4 +450,7 @@ class RCCarEnvTrainWrapper(gym.Wrapper):
 
         self.elapsed_steps += 1
 
-        return scan, reward, terminate, truncated, info
+        processed = self._process_scan(scan)
+        self.frames.append(processed)
+
+        return self._get_stacked_obs(), reward, terminate, truncated, info

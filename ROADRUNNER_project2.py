@@ -96,7 +96,7 @@ def get_args():
     parser.add_argument("--batch_size", default=64, type=int, help="Minibatch size for PPO update")
     parser.add_argument("--n_epochs", default=10, type=int, help="Number of epochs to update policy per rollout")
     parser.add_argument("--lr", default=3e-5, type=float, help="Learning rate")
-    parser.add_argument("--ent_coef", default=1e-6, type=float, help="Entropy coefficient")
+    parser.add_argument("--ent_coef", default=1e-3, type=float, help="Entropy coefficient")
 
 
     ################### CHANGE END  ###################
@@ -407,7 +407,7 @@ class RCCarPolicy(Node):
                         
                         if self.center_lidar_idx <= idx_inner:
                             # [수정] 약한 inner 페널티 (코너의 50%)
-                            penalty = self.corner_penalty_coeff * 0.5 
+                            penalty = self.corner_penalty_coeff * 3.0
                             heading_reward -= penalty
                             cause_string = f"Straight-Inner Penalty (-{penalty:.2f})"
                         else:
@@ -436,7 +436,7 @@ class RCCarPolicy(Node):
 
                         if self.center_lidar_idx >= idx_inner:
                             # [수정] 약한 inner 페널티 (코너의 50%)
-                            penalty = self.corner_penalty_coeff * 0.5
+                            penalty = self.corner_penalty_coeff * 3.0
                             heading_reward -= penalty
                             cause_string = f"Straight-Inner Penalty (-{penalty:.2f})"
                         else:
@@ -459,12 +459,12 @@ class RCCarPolicy(Node):
                 else:
                     # 1b. 최대 거리의 중앙(max_idx)이 정면(359)에 가까울수록 보상
                     course_type = "Straight-Center"
-                    reward_range_half = 60 # [수정] 10 -> 20 (359 +/- 20) -> 339 ~ 379
+                    reward_range_half = 40 # [수정] 10 -> 20 (359 +/- 20) -> 339 ~ 379
                     idx_diff = abs(max_idx - self.center_lidar_idx)
                     
                     if idx_diff < reward_range_half:
                         # [수정] 범위가 넓어진 만큼 외각에서는 약한 보상을 받게 됨
-                        bonus = self.straight_reward_coeff * ((reward_range_half - idx_diff) / reward_range_half)
+                        bonus = 3.0 * self.straight_reward_coeff * ((reward_range_half - idx_diff) / reward_range_half)
                         heading_reward += bonus
                         cause_string = f"Center Bonus (+{bonus:.2f})"
                     elif cause_string == "None":
@@ -494,13 +494,13 @@ class RCCarPolicy(Node):
                     # === 2A. 좌회전 코스 ===
                     course_type = "Left Corner"
                     if self.center_lidar_idx <= idx_inner:
-                        heading_reward -= self.corner_penalty_coeff * 1.0
+                        heading_reward -= self.corner_penalty_coeff * 3.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
-                        reward_range_corner = 100 
+                        reward_range_corner = 80 # [수정] 20 -> 40 (보상 범위 2배)
                         flat_reward_range = 40
                         linear_reward_end = reward_range_corner
-                        neutral_range_corner = 60 
+                        neutral_range_corner = 40 # [추가] 페널티 전 중립 구간 (20)
                         
                         idx_diff_corner = self.center_lidar_idx - idx_outer
                         
@@ -529,31 +529,32 @@ class RCCarPolicy(Node):
                     # === 2B. 우회전 코스 ===
                     course_type = "Right Corner"
                     if self.center_lidar_idx >= idx_inner:
-                        heading_reward -= self.corner_penalty_coeff * 1.0
+                        heading_reward -= self.corner_penalty_coeff * 3.0
                         cause_string = f"Corner Inner Penalty (-{self.corner_penalty_coeff:.2f})"
                     else:
-                        reward_range_corner = 100 
-                        flat_reward_range = 40
+                        # [수정] 좌회전과 동일한 구조로 변경
+                        reward_range_corner = 80 # [수정] 80 -> 100
+                        flat_reward_range = 40    # [추가]
                         linear_reward_end = reward_range_corner
-                        neutral_range_corner = 60 
+                        neutral_range_corner = 40 # [수정] 80 -> 60
                         
                         idx_diff_corner = idx_outer - self.center_lidar_idx
                         
                         if 0 <= idx_diff_corner < flat_reward_range:
-                            # 1. Flat 구간 (0 ~ 19): 최대 보상
+                            # 1. Flat 구간 (0 ~ 39): 최대 보상
                             bonus = self.corner_reward_coeff * 1.0
                             heading_reward += bonus
                             cause_string = f"Corner Bonus (Flat) (+{bonus:.2f})"
                         elif flat_reward_range <= idx_diff_corner < linear_reward_end:
-                            # 2. Linear 구간 (20 ~ 39): 1.0 -> 0.0 으로 선형 감소
-                            linear_range_len = linear_reward_end - flat_reward_range # 20
+                            # 2. Linear 구간 (40 ~ 99): 1.0 -> 0.0 으로 선형 감소
+                            linear_range_len = linear_reward_end - flat_reward_range # 60
                             bonus = self.corner_reward_coeff * ((linear_reward_end - idx_diff_corner) / linear_range_len)
                             heading_reward += bonus
                             cause_string = f"Corner Bonus (Linear) (+{bonus:.2f})"
-                        elif linear_reward_end <= idx_diff_corner < (linear_reward_end + neutral_range_corner): # [추가] (40 ~ 59)
+                        elif linear_reward_end <= idx_diff_corner < (linear_reward_end + neutral_range_corner): # (100 ~ 159)
                             cause_string = "Corner (Neutral)" # 중립 구간
-                        elif idx_diff_corner >= (linear_reward_end + neutral_range_corner): # [수정] (>= 60)
-                            heading_reward -= self.corner_penalty_coeff * 0.5 
+                        elif idx_diff_corner >= (linear_reward_end + neutral_range_corner): # (>= 160)
+                            heading_reward -= self.corner_penalty_coeff * 0.5
                             cause_string = f"Corner Outer Penalty (-{self.corner_penalty_coeff * 0.5:.2f})"
                         else:
                             cause_string = "Corner (Neutral)"
@@ -571,7 +572,7 @@ class RCCarPolicy(Node):
             'cause': cause_string
         }
         return heading_reward, debug_info
-
+ 
     def query_callback(self, query_msg):
 
         id = query_msg.id

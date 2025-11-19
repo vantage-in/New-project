@@ -36,7 +36,7 @@ class PPO:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_range: float = 0.2,
-        vf_coef: float = 2.0,
+        vf_coef: float = 1.0,
         max_grad_norm: float = 0.5,
         checkpoint_freq: int = int(1e6),
         checkpoint_prefix: Optional[str] = None,
@@ -246,11 +246,6 @@ class PPO:
                 b_actions = self.actions_buffer.reshape((-1, self.act_dim))
                 b_advantages = self.advantages_buffer.reshape(-1)
                 b_returns = self.returns_buffer.reshape(-1)
-
-                # --- [추가 코드 시작] ---
-                # Critic 학습 안정화를 위해 Returns(타겟)를 정규화합니다.
-                b_returns = (b_returns - b_returns.mean()) / (b_returns.std() + 1e-8)
-                # --- [추가 코드 끝] ---
                 
                 total_batch_size = self.n_steps * self.num_envs
                 
